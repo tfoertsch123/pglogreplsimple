@@ -1,5 +1,5 @@
 // Package pglogreplsimple provides a high-level wrapper around the
-// github.com/jackc/pglogrepl package for consuming PostgreSQL logical
+// [github.com/jackc/pglogrepl] package for consuming PostgreSQL logical
 // replication streams.
 //
 // It manages the full lifecycle of a logical replication receiver:
