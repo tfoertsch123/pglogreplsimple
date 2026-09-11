@@ -1,0 +1,5 @@
+.gitignore
+*~
+cover.out
+coverage.html
+example/example
