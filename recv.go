@@ -160,7 +160,7 @@ type recvStatus struct {
 type reloadRequest struct{}
 
 func(_ reloadRequest) Error() string {
-	return "Reload Requested"
+	return "Reload requested"
 }
 
 // Receiver manages a single logical replication connection to a PostgreSQL

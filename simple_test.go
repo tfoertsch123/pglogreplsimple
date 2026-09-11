@@ -302,6 +302,15 @@ func TestConfigureNoLogger(t *testing.T) {
 	if r.lastErr != ErrNoLogger {
 		t.Errorf("lastErr = %v, want ErrNoLogger", r.lastErr)
 	}
+
+	r.reload_p = &Param{}
+	got = r.configure(Connect)
+	if got != Stop {
+		t.Errorf("configure() = %v, want Stop", got)
+	}
+	if r.lastErr != ErrNoLogger {
+		t.Errorf("lastErr = %v, want ErrNoLogger", r.lastErr)
+	}
 }
 
 func TestConfigureNoReload(t *testing.T) {
@@ -755,6 +764,15 @@ func TestShutdown(t *testing.T) {
 		// good
 	default:
 		t.Error("shutdownCtx was not canceled after Shutdown()")
+	}
+}
+
+func TestReloadRequestType(t *testing.T) {
+	err := reloadRequest{}
+	exp := "Reload requested"
+	if got := err.Error(); got != exp {
+		t.Errorf("reloadRequest{}.Error(): expecting <%v>, got <%v>",
+			exp, got)
 	}
 }
  

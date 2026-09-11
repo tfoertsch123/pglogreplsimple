@@ -93,6 +93,7 @@ func execSQL(t *testing.T, connInfo, sql string) []*pgconn.Result {
 	}
 	defer conn.Close(context.Background())
 
+	t.Logf("execSQL: %v", sql)
 	res, err := conn.Exec(ctx, sql).ReadAll()
 	if err != nil {
 		t.Fatalf("exec %q: %v", sql, err)
@@ -102,9 +103,9 @@ func execSQL(t *testing.T, connInfo, sql string) []*pgconn.Result {
 }
 
 // setupTable creates or empties the test table
-func setupTable(t *testing.T, connInfo string) {
+func setupTable(t *testing.T, connInfo string) []*pgconn.Result {
 	t.Helper()
-	execSQL(t, connInfo,
+	return execSQL(t, connInfo,
 		`CREATE TABLE IF NOT EXISTS
 			 pglogreplsimple_test(id int primary key, val text);
 		 DELETE FROM pglogreplsimple_test;`)
@@ -221,7 +222,45 @@ func TestIntegrationShutdown(t *testing.T) {
 	}
 }
 
-func TestIntegrationBreakAndResume(t *testing.T) {
+func TestIntegrationNoContext(t *testing.T) {
+	connInfo := requireDB(t)
+	slot := slotName(t)
+	cleanup := createSlot(t, connInfo, slot)
+	defer cleanup()
+
+	r := newIntegrationReceiver(t, connInfo, slot)
+
+	unexpectedErr := errors.New("unexpected shutdown")
+	time.AfterFunc(30*time.Second, func() {
+		r.Shutdown(unexpectedErr)
+	})
+
+	it, err := r.Produce(nil)
+	if err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	shutdownErr := errors.New("test shutdown")
+
+	// Shutdown from another goroutine after a short delay.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		r.Shutdown(shutdownErr)
+	}()
+
+	for range it {
+		// drain until shutdown ends the iterator
+	}
+
+	if r.State() != Stop {
+		t.Errorf("State() = %v, want Stop", r.State())
+	}
+	if r.Err() != shutdownErr {
+		t.Errorf("Err() = %v, want %v", r.Err(), shutdownErr)
+	}
+}
+
+func TestIntegrationBreakAndClose(t *testing.T) {
 	connInfo := requireDB(t)
 	slot := slotName(t)
 	cleanup := createSlot(t, connInfo, slot)
@@ -244,6 +283,74 @@ func TestIntegrationBreakAndResume(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		execSQL(t, connInfo,
 			`INSERT INTO pglogreplsimple_test VALUES (1, 'first');`)
+	}()
+
+	gotMsg := false
+	for msg := range it1 {
+		gotMsg = true
+		switch dat := msg.(type) {
+		case *pglogrepl.XLogData:
+			t.Logf("WALData(it1): %v", string(dat.WALData))
+			r.AckLSN(dat.WALStart)
+		case *pglogrepl.PrimaryKeepaliveMessage:
+			t.Logf("PKM(it1): %v", dat)
+			r.AckLSN(dat.ServerWALEnd)
+		}
+		break // exit the loop; state should be Break
+	}
+
+	if !gotMsg {
+		t.Fatal("expected at least one message before break")
+	}
+
+	// After break, Produce resets state to Recv (not Break) so that a
+	// subsequent Produce call can resume.
+	if r.State() != Recv {
+		t.Errorf("State() = %v, want Recv (after break)", r.State())
+	}
+
+	if r.conn == nil {
+		t.Fatal("break should leave the connection intact")
+	}
+
+	// Close should work from the Break state.
+	err = r.Close()
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if r.State() != Stop {
+		t.Errorf("State() = %v, want Stop (after Close())", r.State())
+	}
+
+	if r.conn != nil {
+		t.Error("conn should be nil (after Close())")
+	}
+}
+
+func TestIntegrationBreakAndResume(t *testing.T) {
+	connInfo := requireDB(t)
+	slot := slotName(t)
+	cleanup := createSlot(t, connInfo, slot)
+	defer cleanup()
+	setupTable(t, connInfo)
+
+	r := newIntegrationReceiver(t, connInfo, slot)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// First Produce: break out after receiving one message.
+	it1, err := r.Produce(ctx)
+	if err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	// Generate a row so there's WAL to receive.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		execSQL(t, connInfo,
+			`INSERT INTO pglogreplsimple_test VALUES (11, 'first');`)
 	}()
 
 	gotMsg := false
