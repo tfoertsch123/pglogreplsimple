@@ -139,16 +139,33 @@ func (nxt Next) String() string {
 // Param holds the configuration parameters for a Receiver.  It is supplied
 // via [WithParams] when the Receiver is created and can be updated at runtime
 // via [Receiver.RequestReload].
-// The CloseOnActivation channel will be closed when these parameters are
-// activated. This can be used for instance if the logger is changed as the
-// result of a reload request to close the connected log file.
 type Param struct {
+	// CloseOnActivation, if non-nil, is closed when this parameter set is
+	// activated by the Receiver.  This can be used, for example, to close an
+	// old log file after a reload switches the Logger.
 	CloseOnActivation chan<- struct{}
+	// ConnInfo is the libpq connection string used to connect to the
+	// PostgreSQL server.  Changing it via [Receiver.RequestReload] triggers a
+	// reconnection.
 	ConnInfo string
+	// SlotName is the name of the logical replication slot to consume from.
+	// Changing it via [Receiver.RequestReload] triggers a reconnection.
 	SlotName string
+	// ErrorRetryInterval is the duration waited before retrying a failed
+	// connection attempt.  Values <= 500 ms are clamped to
+	// [DefaultErrorRetryInterval].
 	ErrorRetryInterval time.Duration
+	// FeedbackInterval is the interval at which standby status updates are
+	// sent to the server.  Values <= 500 ms are clamped to
+	// [DefaultFeedbackInterval].
 	FeedbackInterval time.Duration
+	// FeedbackOnFlush, when non-nil and true, causes [Receiver.AckLSN] to
+	// send a standby status update immediately whenever the flush position
+	// advances, rather than waiting for the next scheduled feedback.  A nil
+	// value leaves the existing setting unchanged during a reload.
 	FeedbackOnFlush *bool
+	// Logger receives diagnostic messages from the Receiver.  It must be set
+	// before calling [Receiver.Produce]; otherwise [ErrNoLogger] is returned.
 	Logger Logger
 }
 
