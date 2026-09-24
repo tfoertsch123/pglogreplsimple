@@ -259,8 +259,12 @@ func (r *Receiver) connInit() Next {
 	return Recv
 }
 
-func (r *Receiver) scheduleFeedback() {
-	r.nextFeedback = time.Now().Add(r.p.FeedbackInterval)
+func (r *Receiver) scheduleFeedback(immediate ...bool) {
+	if len(immediate) > 0 && immediate[0] {
+		r.nextFeedback = time.Now()
+	} else {
+		r.nextFeedback = time.Now().Add(r.p.FeedbackInterval)
+	}
 }
 
 // AckLSN advances the LSN positions reported to the server in the next
@@ -286,6 +290,10 @@ func (r *Receiver) AckLSN(write pglogrepl.LSN, other ...pglogrepl.LSN) {
 		r.recvStat.wpos = max(r.recvStat.wpos, write)
 		r.recvStat.fpos = max(r.recvStat.wpos, other[0])
 		r.recvStat.rpos = max(r.recvStat.wpos, other[1])
+	}
+
+	if r.feedbackOnFlush && r.prevStat.fpos < r.recvStat.fpos {
+		r.scheduleFeedback(true) // immediate feedback after flushpos increase
 	}
 }
 

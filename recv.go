@@ -148,6 +148,7 @@ type Param struct {
 	SlotName string
 	ErrorRetryInterval time.Duration
 	FeedbackInterval time.Duration
+	FeedbackOnFlush *bool
 	Logger Logger
 }
 
@@ -183,6 +184,7 @@ type Receiver struct {
 	recvStat recvStatus			// written by m2 as it writes the file
 	prevStat recvStatus			// written by SendFeedback()
 	nextFeedback time.Time		// when to send the next Feedback
+	feedbackOnFlush bool		// send feedback each time fpos is advanced
 
 	// will be cancelled when it's time to exit
 	shutdownCtx context.Context
@@ -413,6 +415,11 @@ func (r *Receiver) configure(nxt Next) Next {
 		r.lg.Debugf("adjusting FeedbackInterval from %v to %v",
 			p.FeedbackInterval, DefaultFeedbackInterval)
 		p.FeedbackInterval = DefaultFeedbackInterval
+	}
+
+	if p.FeedbackOnFlush != nil {
+		r.p.FeedbackOnFlush = p.FeedbackOnFlush
+		r.feedbackOnFlush = *p.FeedbackOnFlush
 	}
 
 	if p.ConnInfo != r.p.ConnInfo {

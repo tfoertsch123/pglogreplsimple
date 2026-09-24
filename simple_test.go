@@ -776,6 +776,108 @@ func TestReloadRequestType(t *testing.T) {
 	}
 }
  
+// ------------------------------------------------------- FeedbackOnFlush
+
+func TestScheduleFeedbackImmediate(t *testing.T) {
+	r := newTestReceiver()
+	before := time.Now()
+	r.scheduleFeedback(true)
+	got := r.nextFeedback
+	// immediate feedback should be ~now, not FeedbackInterval in the future
+	if got.Before(before.Add(-50*time.Millisecond)) ||
+		got.After(before.Add(50*time.Millisecond)) {
+		t.Errorf("nextFeedback = %v, want ~now (%v)", got, before)
+	}
+}
+
+func TestAckLSNFeedbackOnFlushTriggersImmediateFeedback(t *testing.T) {
+	r := newTestReceiver()
+	r.feedbackOnFlush = true
+	// Set a future nextFeedback so we can detect the override.
+	r.nextFeedback = time.Now().Add(1 * time.Hour)
+	before := time.Now()
+	r.AckLSN(100)
+	got := r.nextFeedback
+	// nextFeedback should have been pulled back to ~now
+	if got.Before(before.Add(-50*time.Millisecond)) ||
+		got.After(before.Add(50*time.Millisecond)) {
+		t.Errorf("nextFeedback = %v, want ~now (%v)", got, before)
+	}
+}
+
+func TestAckLSNFeedbackOnFlushNoAdvance(t *testing.T) {
+	r := newTestReceiver()
+	r.feedbackOnFlush = true
+	// Pre-set fpos so AckLSN(100) does not advance it.
+	r.recvStat.fpos = 200
+	r.prevStat.fpos = 200
+	far := time.Now().Add(1 * time.Hour)
+	r.nextFeedback = far
+	r.AckLSN(100) // 100 < 200, no advancement
+	if r.nextFeedback != far {
+		t.Errorf("nextFeedback = %v, want unchanged (%v)", r.nextFeedback, far)
+	}
+}
+
+func TestAckLSNNoFeedbackOnFlush(t *testing.T) {
+	r := newTestReceiver()
+	// feedbackOnFlush is false (default)
+	far := time.Now().Add(1 * time.Hour)
+	r.nextFeedback = far
+	r.AckLSN(100)
+	if r.nextFeedback != far {
+		t.Errorf("nextFeedback = %v, want unchanged (%v)", r.nextFeedback, far)
+	}
+}
+
+func TestConfigureFeedbackOnFlush(t *testing.T) {
+	r := newTestReceiver()
+	tVal := true
+	r.reload_p = &Param{
+		Logger:             fakeLogger{},
+		FeedbackOnFlush:    &tVal,
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	r.configure(Recv)
+	if !r.feedbackOnFlush {
+		t.Error("feedbackOnFlush = false, want true")
+	}
+	if r.p.FeedbackOnFlush == nil || *r.p.FeedbackOnFlush != true {
+		t.Error("p.FeedbackOnFlush not set correctly")
+	}
+
+	// Now reload with it turned off.
+	fVal := false
+	r.reload_p = &Param{
+		Logger:             fakeLogger{},
+		FeedbackOnFlush:    &fVal,
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	r.configure(Recv)
+	if r.feedbackOnFlush {
+		t.Error("feedbackOnFlush = true, want false")
+	}
+}
+
+func TestConfigureFeedbackOnFlushNil(t *testing.T) {
+	r := newTestReceiver()
+	tVal := true
+	r.feedbackOnFlush = true
+	r.p.FeedbackOnFlush = &tVal
+	r.reload_p = &Param{
+		Logger:             fakeLogger{},
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	r.configure(Recv)
+	// nil FeedbackOnFlush in reload should not change existing state
+	if !r.feedbackOnFlush {
+		t.Error("feedbackOnFlush = false, want unchanged (true)")
+	}
+}
+
 // Local Variables:
 // tab-width: 4
 // End:
