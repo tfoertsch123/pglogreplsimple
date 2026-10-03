@@ -136,6 +136,10 @@ func (nxt Next) String() string {
 	return []string{"Connect", "Recv", "Break", "Stop"}[nxt]
 }
 
+// OnActivationFunc is a callback function type used as part of the parameter
+// activation procedure.
+type OnActivationFunc func() error
+
 // Param holds the configuration parameters for a Receiver.  It is supplied
 // via [WithParams] when the Receiver is created and can be updated at runtime
 // via [Receiver.RequestReload].
@@ -144,6 +148,11 @@ type Param struct {
 	// activated by the Receiver.  This can be used, for example, to close an
 	// old log file after a reload switches the Logger.
 	CloseOnActivation chan<- struct{}
+	// OnActivation, if non-nil, is called when this parameter set has been
+	// activated by the Receiver. The function is called by the same go
+	// routine as the iterator returned by [Produce]. If the function returns
+	// a non-nil error, the iterator is stopped.
+	OnActivation OnActivationFunc
 	// ConnInfo is the libpq connection string used to connect to the
 	// PostgreSQL server.  Changing it via [Receiver.RequestReload] triggers a
 	// reconnection.
@@ -449,12 +458,12 @@ func (r *Receiver) configure(nxt Next) Next {
 		return Stop // no logger is fatal
 	}
 
-	if p.ErrorRetryInterval <= 500*time.Millisecond {
+	if p.ErrorRetryInterval < 500*time.Millisecond {
 		r.lg.Debugf("adjusting ErrorRetryInterval from %v to %v",
 			p.ErrorRetryInterval, DefaultErrorRetryInterval)
 		p.ErrorRetryInterval = DefaultErrorRetryInterval
 	}
-	if p.FeedbackInterval <= 500*time.Millisecond {
+	if p.FeedbackInterval < 500*time.Millisecond {
 		r.lg.Debugf("adjusting FeedbackInterval from %v to %v",
 			p.FeedbackInterval, DefaultFeedbackInterval)
 		p.FeedbackInterval = DefaultFeedbackInterval
@@ -478,6 +487,14 @@ func (r *Receiver) configure(nxt Next) Next {
 	if p.CloseOnActivation != nil {
 		close(p.CloseOnActivation)
 	}
+
+	if p.OnActivation != nil {
+		if err := p.OnActivation(); err != nil {
+			r.lastErr = err
+			return Stop
+		}
+	}
+
 	return nxt
 }
 

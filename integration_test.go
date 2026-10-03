@@ -202,17 +202,12 @@ func TestIntegrationOnConnect(t *testing.T) {
 	}
 
 	msgCount := 0
-	cancelAfter := time.After(500 * time.Millisecond)
 	for msg := range it {
-		select {
-		case <-cancelAfter:
-			cancel()
-		default:
-		}
 		switch dat := msg.(type) {
 		case *pglogrepl.XLogData:
 			msgCount++
 			r.AckLSN(dat.WALStart)
+			cancel()
 		case *pglogrepl.PrimaryKeepaliveMessage:
 			r.AckLSN(dat.ServerWALEnd)
 		case *pgproto3.NoticeResponse:
@@ -252,6 +247,7 @@ func TestIntegrationOnConnectError(t *testing.T) {
 	callbackCalls := 0
 	var firstErr = errors.New("onConnect: first attempt fails")
 
+
 	r := NewReceiver(
 		WithParams(&Param{
 			Logger:             fakeLogger{},
@@ -264,6 +260,7 @@ func TestIntegrationOnConnectError(t *testing.T) {
 			"test_decoding": {},
 		}),
 		WithOnConnect(func(recv *Receiver) error {
+			t.Logf("%v ON-CONNECT", time.Now())
 			callbackCalls++
 			if callbackCalls == 1 {
 				return firstErr
@@ -281,17 +278,12 @@ func TestIntegrationOnConnectError(t *testing.T) {
 	}
 
 	msgCount := 0
-	cancelAfter := time.After(10 * time.Second)
 	for msg := range it {
-		select {
-		case <-cancelAfter:
-			cancel()
-		default:
-		}
 		switch dat := msg.(type) {
 		case *pglogrepl.XLogData:
 			msgCount++
 			r.AckLSN(dat.WALStart)
+			cancel()
 		case *pglogrepl.PrimaryKeepaliveMessage:
 			r.AckLSN(dat.ServerWALEnd)
 		case *pgproto3.NoticeResponse:
