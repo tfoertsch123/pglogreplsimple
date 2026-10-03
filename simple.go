@@ -202,6 +202,10 @@ func (r *Receiver) connInit() Next {
 		return r.errPause(ctx, cancel, "LSN %v: %v", confirmedFlushLSN, err)
 	}
 
+	if r.onConnect != nil {
+		r.onConnect(r)
+	}
+
 	ourlsn := r.recvStat.wpos
 	adjstat := func() {}
 	if ourlsn == pglogrepl.LSN(0) {
@@ -209,39 +213,39 @@ func (r *Receiver) connInit() Next {
 		if ourlsn == pglogrepl.LSN(0) {
 			ourlsn = slotlsn
 		}
-		if ourlsn < slotlsn {
-			r.shutdownTrg(ErrConfirmedFlushLSN)
-			return r.errPause(ctx, cancel,
-				"Confirmed Flush LSN %v is ahead of requested start LSN %v",
-				slotlsn, ourlsn,
-			)
-		}
-		// If the user requests a start LSN too far in the future, we
-		// refuse to connect. PG would accept it. But we'd send our first
-		// feedback message with that LSN as writeLSN. That would ruin
-		// the slot if that's given by mistake. On the other hand, if it's
-		// not a mistake, we'd just wait until the server is beyond that
-		// point. For that reason, this is not an error causing us to
-		// stop. Instead, we'd log a message until the server has reached
-		// the given start LSN.
-		endlsn, err := pglogrepl.ParseLSN(serverEndLSN)
-		if err != nil {
-			r.shutdownTrg(err)
-			return r.errPause(ctx, cancel, "LSN %v: %v", serverEndLSN, err)
-		}
-		if r.startLSN > endlsn {
-			return r.errPause(ctx, cancel,
-				"StartLSN (%v) cannot be ahead of latest known LSN (%v)",
-				r.startLSN, serverEndLSN)
-		}
-		
 		adjstat = func() {
 			r.recvStat.wpos = ourlsn
 			r.recvStat.fpos = ourlsn
 			r.recvStat.rpos = ourlsn
 		}
 	}
-		
+
+	if ourlsn < slotlsn {
+		r.shutdownTrg(ErrConfirmedFlushLSN)
+		return r.errPause(ctx, cancel,
+			"Confirmed Flush LSN %v is ahead of requested start LSN %v",
+			slotlsn, ourlsn,
+		)
+	}
+	// If the user requests a start LSN too far in the future, we
+	// refuse to connect. PG would accept it. But we'd send our first
+	// feedback message with that LSN as writeLSN. That would ruin
+	// the slot if that's given by mistake. On the other hand, if it's
+	// not a mistake, we'd just wait until the server is beyond that
+	// point. For that reason, this is not an error causing us to
+	// stop. Instead, we'd log a message until the server has reached
+	// the given start LSN.
+	endlsn, err := pglogrepl.ParseLSN(serverEndLSN)
+	if err != nil {
+		r.shutdownTrg(err)
+		return r.errPause(ctx, cancel, "LSN %v: %v", serverEndLSN, err)
+	}
+	if ourlsn > endlsn {
+		return r.errPause(ctx, cancel,
+			"StartLSN (%v) cannot be ahead of latest known LSN (%v)",
+			r.startLSN, serverEndLSN)
+	}
+
 	err = pglogrepl.StartReplication(
 		ctx,
 		conn,

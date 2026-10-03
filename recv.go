@@ -73,10 +73,10 @@
 package pglogreplsimple
 
 import (
-	"time"
-	"iter"
-	"errors"
 	"context"
+	"errors"
+	"iter"
+	"time"
 
 	"sync"
 
@@ -86,7 +86,7 @@ import (
 
 // MsgItem is a type that is either a *pglogrepl.PrimaryKeepaliveMessage,
 // a *pglogrepl.XLogData or a *pgproto3.NoticeResponse.
-type MsgItem interface {}
+type MsgItem interface{}
 
 // Logger is an interface type representing the expected logger interface
 // The [github.com/tfoertsch123/log] module provides a logger with this
@@ -101,8 +101,8 @@ type Logger interface {
 	Debg4(string)
 	Debg5(string)
 	Errorf(string, ...interface{})
-	Warnf(string,  ...interface{})
-	Infof(string,  ...interface{})
+	Warnf(string, ...interface{})
+	Infof(string, ...interface{})
 	Debugf(string, ...interface{})
 	Debg2f(string, ...interface{})
 	Debg3f(string, ...interface{})
@@ -177,9 +177,13 @@ type recvStatus struct {
 
 type reloadRequest struct{}
 
-func(_ reloadRequest) Error() string {
+func (_ reloadRequest) Error() string {
 	return "Reload requested"
 }
+
+// OnConnectFunc is a function type describing the parameter to
+// [WithOnConnect].
+type OnConnectFunc func(*Receiver)
 
 // Receiver manages a single logical replication connection to a PostgreSQL
 // database.  It connects to the server, starts replication on a named slot,
@@ -190,18 +194,19 @@ func(_ reloadRequest) Error() string {
 // the confirmed-flush LSN.  The Receiver handles reconnection, standby
 // feedback, and graceful shutdown internally.
 type Receiver struct {
-	producing sync.Mutex		// prevents multiple Produce() calls
-	state Next
-	plugin string				// the current plugin set after connect
+	producing       sync.Mutex // prevents multiple Produce() calls
+	state           Next
+	plugin          string              // the current plugin set after connect
 	acceptedPlugins map[string][]string // plugins + options
-	p Param						// the current set of params
-	lg Logger
-	startLSN pglogrepl.LSN
-	conn *pgconn.PgConn
-	recvStat recvStatus			// written by m2 as it writes the file
-	prevStat recvStatus			// written by SendFeedback()
-	nextFeedback time.Time		// when to send the next Feedback
-	feedbackOnFlush bool		// send feedback each time fpos is advanced
+	p               Param               // the current set of params
+	lg              Logger
+	startLSN        pglogrepl.LSN
+	onConnect       OnConnectFunc
+	conn            *pgconn.PgConn
+	recvStat        recvStatus // written by AckLSN()
+	prevStat        recvStatus // written by SendFeedback()
+	nextFeedback    time.Time  // when to send the next Feedback
+	feedbackOnFlush bool       // send feedback each time fpos is advanced
 
 	// will be cancelled when it's time to exit
 	shutdownCtx context.Context
@@ -213,8 +218,8 @@ type Receiver struct {
 	// ReceiveMessage is called with a context derived from shutdownCtx.
 	// This is the cancel function of that derived context. It is called
 	// upon Reload and when the deadline exceeds.
-	mu sync.Mutex
-	reload_p *Param
+	mu            sync.Mutex
+	reload_p      *Param
 	cancelCurrent context.CancelCauseFunc
 }
 
@@ -247,14 +252,17 @@ var (
 )
 
 type rOpts struct {
-	p *Param
+	p               *Param
 	acceptedPlugins map[string][]string
-	startLSN pglogrepl.LSN	
+	startLSN        pglogrepl.LSN
+	onConnect       OnConnectFunc
 }
+
 // Opt is a configuration option applied to a new Receiver.  Use the provided
 // option functions (e.g. [WithParams], [WithAcceptedPlugins], [WithStartLSN])
 // to construct an Opt.
 type Opt func(*rOpts)
+
 // WithParams sets the initial [Param] values for the Receiver.  The Param is
 // copied and applied during the first call to [Receiver.Produce].
 func WithParams(x *Param) Opt {
@@ -262,6 +270,7 @@ func WithParams(x *Param) Opt {
 		o.p = x
 	}
 }
+
 // WithAcceptedPlugins sets the map of accepted logical-decoding plugin names
 // to their plugin-option argument lists.  The slot's plugin must appear as a
 // key in this map or the Receiver will refuse to start replication.
@@ -273,12 +282,24 @@ func WithAcceptedPlugins(x map[string][]string) Opt {
 		o.acceptedPlugins = x
 	}
 }
+
 // WithStartLSN sets the starting LSN used when the Receiver connects for the
 // first time and no confirmed-flush LSN has been recorded yet.  If zero, the
 // slot's confirmed_flush_lsn is used.
 func WithStartLSN(x pglogrepl.LSN) Opt {
 	return func(o *rOpts) {
 		o.startLSN = x
+	}
+}
+
+// WithOnConnect sets a callback function that is called after the [Receiver]
+// has connected to the database right before the `START_REPLICATION` command
+// is issued. This function can call [AckLSN] in order to set the LSN at which
+// replication is started. The write-LSN parameter to [AckLSN] is used.
+// If used at startup, this superseeds the LSN passed with [WithStartLSN].
+func WithOnConnect(x OnConnectFunc) Opt {
+	return func(o *rOpts) {
+		o.onConnect = x
 	}
 }
 
@@ -304,11 +325,11 @@ var DefaultPlugins = map[string][]string{
 
 // DefaultErrorRetryInterval is the duration waited before retrying a failed
 // connection attempt when no explicit interval is set.
-const DefaultErrorRetryInterval = 5*time.Second
+const DefaultErrorRetryInterval = 5 * time.Second
 
 // DefaultFeedbackInterval is the default interval at which standby status
 // updates (feedback) are sent to the server.
-const DefaultFeedbackInterval = 10*time.Second
+const DefaultFeedbackInterval = 10 * time.Second
 
 // NewReceiver creates a new [Receiver] configured with the given options.
 // If no [WithParams] option is supplied, default values are used for the
@@ -340,11 +361,12 @@ func NewReceiver(p ...Opt) *Receiver {
 	r := &Receiver{
 		p: Param{
 			ErrorRetryInterval: DefaultErrorRetryInterval,
-			FeedbackInterval: DefaultFeedbackInterval,
+			FeedbackInterval:   DefaultFeedbackInterval,
 		},
-		reload_p: opts.p,
-		startLSN: opts.startLSN,
+		reload_p:        opts.p,
+		startLSN:        opts.startLSN,
 		acceptedPlugins: opts.acceptedPlugins,
+		onConnect:       opts.onConnect,
 	}
 
 	return r
@@ -399,7 +421,7 @@ func (r *Receiver) Close() error {
 
 func (r *Receiver) configure(nxt Next) Next {
 	switch r.state {
-	case Break, Stop:			// no change and no reload in these states
+	case Break, Stop: // no change and no reload in these states
 		return r.state
 	}
 	r.mu.Lock()
@@ -407,28 +429,28 @@ func (r *Receiver) configure(nxt Next) Next {
 		r.mu.Unlock()
 		if r.lg == nil {
 			r.lastErr = ErrNoLogger
-			return Stop			// no logger is fatal
+			return Stop // no logger is fatal
 		}
-		return nxt				// nothing to do
+		return nxt // nothing to do
 	}
 	var p *Param
 	p, r.reload_p = r.reload_p, nil
 	r.mu.Unlock()
 
 	if p.Logger != nil {
-		r.lg = p.Logger			// logger first
+		r.lg = p.Logger // logger first
 	}
 	if r.lg == nil {
 		r.lastErr = ErrNoLogger
-		return Stop				// no logger is fatal
+		return Stop // no logger is fatal
 	}
 
-	if p.ErrorRetryInterval <= 500 * time.Millisecond {
+	if p.ErrorRetryInterval <= 500*time.Millisecond {
 		r.lg.Debugf("adjusting ErrorRetryInterval from %v to %v",
 			p.ErrorRetryInterval, DefaultErrorRetryInterval)
 		p.ErrorRetryInterval = DefaultErrorRetryInterval
 	}
-	if p.FeedbackInterval <= 500 * time.Millisecond {
+	if p.FeedbackInterval <= 500*time.Millisecond {
 		r.lg.Debugf("adjusting FeedbackInterval from %v to %v",
 			p.FeedbackInterval, DefaultFeedbackInterval)
 		p.FeedbackInterval = DefaultFeedbackInterval
@@ -482,9 +504,9 @@ func (r *Receiver) RequestReload(p Param) {
 
 // Produce starts the replication receive loop and returns an iterator over
 // WAL messages.  Each yielded item is either
-//  - a *pglogrepl.PrimaryKeepaliveMessage or
-//  - a *pglogrepl.XLogData or
-//  - a *pgproto3.NoticeResponse (see [MsgItem]).
+//   - a *pglogrepl.PrimaryKeepaliveMessage or
+//   - a *pglogrepl.XLogData or
+//   - a *pgproto3.NoticeResponse (see [MsgItem]).
 //
 // If the "for range" iterator style does not fit your needs, the returned
 // [iter.Seq] can easily be converted into a pull-style iterator.

@@ -15,22 +15,22 @@ import (
 // fakeLogger is a no-op Logger that satisfies the Logger interface.
 type fakeLogger struct{}
 
-func (fakeLogger) Error(string)               {}
-func (fakeLogger) Warn(string)                {}
-func (fakeLogger) Info(string)                {}
-func (fakeLogger) Debug(string)               {}
-func (fakeLogger) Debg2(string)               {}
-func (fakeLogger) Debg3(string)               {}
-func (fakeLogger) Debg4(string)               {}
-func (fakeLogger) Debg5(string)               {}
-func (fakeLogger) Errorf(string, ...any)      {}
-func (fakeLogger) Warnf(string, ...any)       {}
-func (fakeLogger) Infof(string, ...any)       {}
-func (fakeLogger) Debugf(string, ...any)      {}
-func (fakeLogger) Debg2f(string, ...any)      {}
-func (fakeLogger) Debg3f(string, ...any)      {}
-func (fakeLogger) Debg4f(string, ...any)      {}
-func (fakeLogger) Debg5f(string, ...any)      {}
+func (fakeLogger) Error(string)          {}
+func (fakeLogger) Warn(string)           {}
+func (fakeLogger) Info(string)           {}
+func (fakeLogger) Debug(string)          {}
+func (fakeLogger) Debg2(string)          {}
+func (fakeLogger) Debg3(string)          {}
+func (fakeLogger) Debg4(string)          {}
+func (fakeLogger) Debg5(string)          {}
+func (fakeLogger) Errorf(string, ...any) {}
+func (fakeLogger) Warnf(string, ...any)  {}
+func (fakeLogger) Infof(string, ...any)  {}
+func (fakeLogger) Debugf(string, ...any) {}
+func (fakeLogger) Debg2f(string, ...any) {}
+func (fakeLogger) Debg3f(string, ...any) {}
+func (fakeLogger) Debg4f(string, ...any) {}
+func (fakeLogger) Debg5f(string, ...any) {}
 
 // newTestReceiver builds a Receiver whose fields are populated enough to
 // exercise the state-machine methods without a real database connection.
@@ -53,7 +53,7 @@ func buildKeepaliveData(serverWALEnd pglogrepl.LSN, replyRequested bool) []byte 
 	buf = append(buf, byte(pglogrepl.PrimaryKeepaliveMessageByteID))
 	tmp := make([]byte, 8)
 	binary.BigEndian.PutUint64(tmp, uint64(serverWALEnd))
-	buf = append(buf, tmp...)          // ServerWALEnd
+	buf = append(buf, tmp...)             // ServerWALEnd
 	buf = append(buf, make([]byte, 8)...) // ServerTime (zero)
 	if replyRequested {
 		buf = append(buf, 1)
@@ -775,7 +775,7 @@ func TestReloadRequestType(t *testing.T) {
 			exp, got)
 	}
 }
- 
+
 // ------------------------------------------------------- FeedbackOnFlush
 
 func TestScheduleFeedbackImmediate(t *testing.T) {
@@ -881,3 +881,30 @@ func TestConfigureFeedbackOnFlushNil(t *testing.T) {
 // Local Variables:
 // tab-width: 4
 // End:
+
+// ---------------------------------------------------------------- WithOnConnect
+
+func TestWithOnConnect(t *testing.T) {
+	called := false
+	cb := func(r *Receiver) {
+		called = true
+		if r == nil {
+			t.Error("onConnect received nil Receiver")
+		}
+	}
+	rcv := NewReceiver(WithOnConnect(cb))
+	if rcv.onConnect == nil {
+		t.Fatal("onConnect is nil, want the callback passed to WithOnConnect")
+	}
+	rcv.onConnect(rcv)
+	if !called {
+		t.Error("onConnect was not invoked")
+	}
+}
+
+func TestWithOnConnectDefault(t *testing.T) {
+	r := NewReceiver()
+	if r.onConnect != nil {
+		t.Error("onConnect is non-nil by default, want nil")
+	}
+}
