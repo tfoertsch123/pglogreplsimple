@@ -3,6 +3,7 @@ package pglogreplsimple
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"testing"
 	"time"
 
@@ -420,6 +421,94 @@ func TestConfigureCloseOnActivation(t *testing.T) {
 	select {
 	case <-ch:
 		// good
+	default:
+		t.Error("CloseOnActivation channel was not closed")
+	}
+}
+
+func TestConfigureOnActivation(t *testing.T) {
+	called := false
+	r := newTestReceiver()
+	r.reload_p = &Param{
+		Logger: fakeLogger{},
+		OnActivation: func() error {
+			called = true
+			return nil
+		},
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	got := r.configure(Recv)
+	if !called {
+		t.Error("OnActivation was not invoked")
+	}
+	if got != Recv {
+		t.Errorf("configure() = %v, want Recv", got)
+	}
+}
+
+func TestConfigureOnActivationError(t *testing.T) {
+	called := false
+	r := newTestReceiver()
+	errSentinel := errors.New("activation failure")
+	r.reload_p = &Param{
+		Logger: fakeLogger{},
+		OnActivation: func() error {
+			called = true
+			return errSentinel
+		},
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	got := r.configure(Recv)
+	if !called {
+		t.Error("OnActivation was not invoked")
+	}
+	if got != Stop {
+		t.Errorf("configure() = %v, want Stop", got)
+	}
+	if r.lastErr != errSentinel {
+		t.Errorf("lastErr = %v, want %v", r.lastErr, errSentinel)
+	}
+}
+
+func TestConfigureOnActivationNil(t *testing.T) {
+	r := newTestReceiver()
+	r.reload_p = &Param{
+		Logger:             fakeLogger{},
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	got := r.configure(Recv)
+	if got != Recv {
+		t.Errorf("configure() = %v, want Recv", got)
+	}
+}
+
+func TestConfigureOnActivationWithCloseOnActivation(t *testing.T) {
+	called := false
+	r := newTestReceiver()
+	ch := make(chan struct{}, 1)
+	r.reload_p = &Param{
+		Logger:            fakeLogger{},
+		CloseOnActivation: ch,
+		OnActivation: func() error {
+			called = true
+			return nil
+		},
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	got := r.configure(Recv)
+	if !called {
+		t.Error("OnActivation was not invoked")
+	}
+	if got != Recv {
+		t.Errorf("configure() = %v, want Recv", got)
+	}
+	select {
+	case <-ch:
+		// good — CloseOnActivation was closed before OnActivation ran
 	default:
 		t.Error("CloseOnActivation channel was not closed")
 	}
