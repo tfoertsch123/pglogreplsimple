@@ -203,7 +203,10 @@ func (r *Receiver) connInit() Next {
 	}
 
 	if r.onConnect != nil {
-		r.onConnect(r)
+		err = r.onConnect(r)
+		if err != nil {
+			return r.errPause(ctx, cancel, "OnConnect: %v", err)
+		}
 	}
 
 	ourlsn := r.recvStat.wpos

@@ -886,17 +886,20 @@ func TestConfigureFeedbackOnFlushNil(t *testing.T) {
 
 func TestWithOnConnect(t *testing.T) {
 	called := false
-	cb := func(r *Receiver) {
+	cb := func(r *Receiver) error {
 		called = true
 		if r == nil {
 			t.Error("onConnect received nil Receiver")
 		}
+		return nil
 	}
 	rcv := NewReceiver(WithOnConnect(cb))
 	if rcv.onConnect == nil {
 		t.Fatal("onConnect is nil, want the callback passed to WithOnConnect")
 	}
-	rcv.onConnect(rcv)
+	if err := rcv.onConnect(rcv); err != nil {
+		t.Errorf("onConnect returned %v, want nil", err)
+	}
 	if !called {
 		t.Error("onConnect was not invoked")
 	}

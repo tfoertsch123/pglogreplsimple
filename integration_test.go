@@ -176,7 +176,7 @@ func TestIntegrationOnConnect(t *testing.T) {
 			"test_decoding": {},
 		}),
 		WithStartLSN(configuredStartLSN),
-		WithOnConnect(func(recv *Receiver) {
+		WithOnConnect(func(recv *Receiver) error {
 			callbackCalls++
 			callbackReceiver = recv
 
@@ -189,6 +189,7 @@ func TestIntegrationOnConnect(t *testing.T) {
 
 			// AckLSN from onConnect supersedes WithStartLSN.
 			recv.AckLSN(slotLSN)
+			return nil
 		}),
 	)
 
@@ -233,6 +234,126 @@ func TestIntegrationOnConnect(t *testing.T) {
 	}
 	if r.Err() != nil && !errors.Is(r.Err(), context.Canceled) {
 		t.Errorf("r.Err() = %v, want nil or context.Canceled", r.Err())
+	}
+}
+
+func TestIntegrationOnConnectError(t *testing.T) {
+	connInfo := requireDB(t)
+	slot := slotName(t)
+	cleanup := createSlot(t, connInfo, slot)
+	defer cleanup()
+	setupTable(t, connInfo)
+
+	// Generate WAL so that, once the callback succeeds, replication produces
+	// at least one XLogData message.
+	execSQL(t, connInfo,
+		`INSERT INTO pglogreplsimple_test VALUES (1, 'on_connect_err')`)
+
+	callbackCalls := 0
+	var firstErr = errors.New("onConnect: first attempt fails")
+
+	r := NewReceiver(
+		WithParams(&Param{
+			Logger:             fakeLogger{},
+			ConnInfo:           connInfo,
+			SlotName:           slot,
+			ErrorRetryInterval: 500 * time.Millisecond,
+			FeedbackInterval:   1 * time.Second,
+		}),
+		WithAcceptedPlugins(map[string][]string{
+			"test_decoding": {},
+		}),
+		WithOnConnect(func(recv *Receiver) error {
+			callbackCalls++
+			if callbackCalls == 1 {
+				return firstErr
+			}
+			return nil
+		}),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	it, err := r.Produce(ctx)
+	if err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	msgCount := 0
+	cancelAfter := time.After(10 * time.Second)
+	for msg := range it {
+		select {
+		case <-cancelAfter:
+			cancel()
+		default:
+		}
+		switch dat := msg.(type) {
+		case *pglogrepl.XLogData:
+			msgCount++
+			r.AckLSN(dat.WALStart)
+		case *pglogrepl.PrimaryKeepaliveMessage:
+			r.AckLSN(dat.ServerWALEnd)
+		case *pgproto3.NoticeResponse:
+			// Notices are allowed.
+		}
+	}
+
+	// The first attempt must fail and trigger a retry; the second must
+	// succeed so the callback was called at least twice.
+	if callbackCalls < 2 {
+		t.Errorf("callbackCalls = %d, want >= 2 (error then retry)", callbackCalls)
+	}
+	if msgCount == 0 {
+		t.Error("no WAL messages received after retry from onConnect error")
+	}
+	if r.Err() != nil && !errors.Is(r.Err(), context.Canceled) {
+		t.Errorf("r.Err() = %v, want nil or context.Canceled", r.Err())
+	}
+}
+
+func TestIntegrationOnConnectShutdown(t *testing.T) {
+	connInfo := requireDB(t)
+	slot := slotName(t)
+	cleanup := createSlot(t, connInfo, slot)
+	defer cleanup()
+
+	shutdownErr := errors.New("shutdown from onConnect")
+
+	r := NewReceiver(
+		WithParams(&Param{
+			Logger:             fakeLogger{},
+			ConnInfo:           connInfo,
+			SlotName:           slot,
+			ErrorRetryInterval: 500 * time.Millisecond,
+			FeedbackInterval:   1 * time.Second,
+		}),
+		WithAcceptedPlugins(map[string][]string{
+			"test_decoding": {},
+		}),
+		WithOnConnect(func(recv *Receiver) error {
+			recv.Shutdown(shutdownErr)
+			return errors.New("onConnect error after shutdown")
+		}),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	it, err := r.Produce(ctx)
+	if err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	for range it {
+		// The iterator must end because Shutdown was called in onConnect.
+	}
+
+	if r.State() != Stop {
+		t.Errorf("State() = %v, want Stop", r.State())
+	}
+	if r.Err() != shutdownErr {
+		t.Errorf("Err() = %v, want %v", r.Err(), shutdownErr)
 	}
 }
 

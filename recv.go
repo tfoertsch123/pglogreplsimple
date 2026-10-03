@@ -183,7 +183,7 @@ func (_ reloadRequest) Error() string {
 
 // OnConnectFunc is a function type describing the parameter to
 // [WithOnConnect].
-type OnConnectFunc func(*Receiver)
+type OnConnectFunc func(*Receiver) error
 
 // Receiver manages a single logical replication connection to a PostgreSQL
 // database.  It connects to the server, starts replication on a named slot,
@@ -297,6 +297,10 @@ func WithStartLSN(x pglogrepl.LSN) Opt {
 // is issued. This function can call [AckLSN] in order to set the LSN at which
 // replication is started. The write-LSN parameter to [AckLSN] is used.
 // If used at startup, this superseeds the LSN passed with [WithStartLSN].
+// If the callback returns an error, the error is logged and the connection
+// is deemed invalid. After the current [ErrorRetryInterval] another attempt
+// to establish a connection will be made. Use [Receiver.Shutdown] if the
+// error should stop processing.
 func WithOnConnect(x OnConnectFunc) Opt {
 	return func(o *rOpts) {
 		o.onConnect = x
