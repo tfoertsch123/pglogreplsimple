@@ -429,10 +429,20 @@ func TestConfigureCloseOnActivation(t *testing.T) {
 func TestConfigureOnActivation(t *testing.T) {
 	called := false
 	r := newTestReceiver()
+	customInterval := 10 * time.Second
 	r.reload_p = &Param{
 		Logger: fakeLogger{},
-		OnActivation: func() error {
+		OnActivation: func(p *Param) error {
 			called = true
+			if p == nil {
+				t.Fatal("OnActivation received nil *Param")
+			}
+			// The passed Param is the one being activated.
+			if p.Logger == nil {
+				t.Error("passed Param.Logger is nil, expected fakeLogger")
+			}
+			// The callback can still change the parameters.
+			p.ErrorRetryInterval = customInterval
 			return nil
 		},
 		ErrorRetryInterval: DefaultErrorRetryInterval,
@@ -445,15 +455,59 @@ func TestConfigureOnActivation(t *testing.T) {
 	if got != Recv {
 		t.Errorf("configure() = %v, want Recv", got)
 	}
+	// The modification made inside OnActivation must take effect.
+	if r.p.ErrorRetryInterval != customInterval {
+		t.Errorf("p.ErrorRetryInterval = %v, want %v (modified inside OnActivation)",
+			r.p.ErrorRetryInterval, customInterval)
+	}
 }
 
 func TestConfigureOnActivationError(t *testing.T) {
 	called := false
 	r := newTestReceiver()
 	errSentinel := errors.New("activation failure")
+	customInterval := 10 * time.Second
 	r.reload_p = &Param{
 		Logger: fakeLogger{},
-		OnActivation: func() error {
+		OnActivation: func(p *Param) error {
+			called = true
+			// The callback can still change the parameters, but on error
+			// the whole set is discarded.
+			p.ErrorRetryInterval = customInterval
+			return errSentinel
+		},
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	got := r.configure(Recv)
+	if !called {
+		t.Error("OnActivation was not invoked")
+	}
+	// On error the parameter set is discarded; configure returns nxt
+	// unchanged instead of stopping the iterator.
+	if got != Recv {
+		t.Errorf("configure() = %v, want Recv", got)
+	}
+	// lastErr must not be set — the error is logged, not stored.
+	if r.lastErr != nil {
+		t.Errorf("lastErr = %v, want nil", r.lastErr)
+	}
+	// Param fields should NOT have been applied (set discarded).
+	if r.p.ErrorRetryInterval != DefaultErrorRetryInterval {
+		t.Errorf("p.ErrorRetryInterval = %v, want %v (unchanged)",
+			r.p.ErrorRetryInterval, DefaultErrorRetryInterval)
+	}
+}
+
+func TestConfigureOnActivationErrorWithCloseOnActivation(t *testing.T) {
+	called := false
+	r := newTestReceiver()
+	errSentinel := errors.New("activation failure")
+	ch := make(chan struct{}, 1)
+	r.reload_p = &Param{
+		Logger:            fakeLogger{},
+		CloseOnActivation: ch,
+		OnActivation: func(_ *Param) error {
 			called = true
 			return errSentinel
 		},
@@ -464,11 +518,89 @@ func TestConfigureOnActivationError(t *testing.T) {
 	if !called {
 		t.Error("OnActivation was not invoked")
 	}
-	if got != Stop {
-		t.Errorf("configure() = %v, want Stop", got)
+	// On error the parameter set is discarded; configure returns nxt.
+	if got != Recv {
+		t.Errorf("configure() = %v, want Recv", got)
 	}
-	if r.lastErr != errSentinel {
-		t.Errorf("lastErr = %v, want %v", r.lastErr, errSentinel)
+	if r.lastErr != nil {
+		t.Errorf("lastErr = %v, want nil", r.lastErr)
+	}
+	// CloseOnActivation is closed via a defer so it fires even on error.
+	select {
+	case <-ch:
+		// good
+	default:
+		t.Error("CloseOnActivation channel was not closed")
+	}
+}
+
+func TestConfigureOnActivationNoChange(t *testing.T) {
+	called := false
+	r := newTestReceiver()
+	customInterval := 10 * time.Second
+	r.reload_p = &Param{
+		Logger: fakeLogger{},
+		OnActivation: func(p *Param) error {
+			called = true
+			if p == nil {
+				t.Fatal("OnActivation received nil *Param")
+			}
+			// The callback can change the parameters, but with ErrNoChange
+			// those changes are NOT applied because configure returns early.
+			p.ErrorRetryInterval = customInterval
+			return ErrNoChange
+		},
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	got := r.configure(Recv)
+	if !called {
+		t.Error("OnActivation was not invoked")
+	}
+	// ErrNoChange short-circuits configure, returning nxt unchanged.
+	if got != Recv {
+		t.Errorf("configure() = %v, want Recv", got)
+	}
+	// lastErr must not be set for ErrNoChange.
+	if r.lastErr != nil {
+		t.Errorf("lastErr = %v, want nil", r.lastErr)
+	}
+	// Param fields modified inside OnActivation should NOT have been
+	// applied because configure returns early on ErrNoChange.
+	if r.p.ErrorRetryInterval != DefaultErrorRetryInterval {
+		t.Errorf("p.ErrorRetryInterval = %v, want %v (unchanged)",
+			r.p.ErrorRetryInterval, DefaultErrorRetryInterval)
+	}
+}
+
+func TestConfigureOnActivationNoChangeWithCloseOnActivation(t *testing.T) {
+	called := false
+	r := newTestReceiver()
+	ch := make(chan struct{}, 1)
+	r.reload_p = &Param{
+		Logger:            fakeLogger{},
+		CloseOnActivation: ch,
+		OnActivation: func(_ *Param) error {
+			called = true
+			return ErrNoChange
+		},
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	got := r.configure(Recv)
+	if !called {
+		t.Error("OnActivation was not invoked")
+	}
+	if got != Recv {
+		t.Errorf("configure() = %v, want Recv", got)
+	}
+	// CloseOnActivation is closed via a defer so it fires even when
+	// OnActivation returns ErrNoChange and configure returns early.
+	select {
+	case <-ch:
+		// good — channel was closed despite ErrNoChange
+	default:
+		t.Error("CloseOnActivation channel was not closed")
 	}
 }
 
@@ -492,8 +624,13 @@ func TestConfigureOnActivationWithCloseOnActivation(t *testing.T) {
 	r.reload_p = &Param{
 		Logger:            fakeLogger{},
 		CloseOnActivation: ch,
-		OnActivation: func() error {
+		OnActivation: func(p *Param) error {
 			called = true
+			if p == nil {
+				t.Fatal("OnActivation received nil *Param")
+			}
+			// The callback can still change the parameters.
+			p.FeedbackInterval = 42 * time.Second
 			return nil
 		},
 		ErrorRetryInterval: DefaultErrorRetryInterval,
@@ -506,9 +643,14 @@ func TestConfigureOnActivationWithCloseOnActivation(t *testing.T) {
 	if got != Recv {
 		t.Errorf("configure() = %v, want Recv", got)
 	}
+	// The modification made inside OnActivation must take effect.
+	if r.p.FeedbackInterval != 42*time.Second {
+		t.Errorf("p.FeedbackInterval = %v, want %v",
+			r.p.FeedbackInterval, 42*time.Second)
+	}
 	select {
 	case <-ch:
-		// good — CloseOnActivation was closed before OnActivation ran
+		// good — CloseOnActivation was closed after OnActivation ran
 	default:
 		t.Error("CloseOnActivation channel was not closed")
 	}

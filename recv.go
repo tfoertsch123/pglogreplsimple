@@ -138,7 +138,7 @@ func (nxt Next) String() string {
 
 // OnActivationFunc is a callback function type used as part of the parameter
 // activation procedure.
-type OnActivationFunc func() error
+type OnActivationFunc func(*Param) error
 
 // Param holds the configuration parameters for a Receiver.  It is supplied
 // via [WithParams] when the Receiver is created and can be updated at runtime
@@ -148,10 +148,13 @@ type Param struct {
 	// activated by the Receiver.  This can be used, for example, to close an
 	// old log file after a reload switches the Logger.
 	CloseOnActivation chan<- struct{}
-	// OnActivation, if non-nil, is called when this parameter set has been
+	// OnActivation, if non-nil, is called when this parameter set is to be
 	// activated by the Receiver. The function is called by the same go
-	// routine as the iterator returned by [Produce]. If the function returns
-	// a non-nil error, the iterator is stopped.
+	// routine as the iterator returned by [Produce]. The function is passed
+	// the parameter package that is to be activated. It can still change the
+	// parameters. If the function returns an error, the error is logged
+	// and the parameter set is discarded. The special value [ErrNoChange]
+	// can be used to simply discard the parameter set without logging.
 	OnActivation OnActivationFunc
 	// ConnInfo is the libpq connection string used to connect to the
 	// PostgreSQL server.  Changing it via [Receiver.RequestReload] triggers a
@@ -234,6 +237,10 @@ type Receiver struct {
 // Package-level error values returned by the Receiver API or stored as a
 // shutdown cause retrievable via [Receiver.Err].
 var (
+	// ErrNoChange can be returned by an [OnActivationFunc] to indicate that
+	// no actual parameter change is requested.
+	ErrNoChange = errors.New("No change")
+
 	// ErrNoLogger is returned when the Receiver is configured without a
 	// logger.  A logger must be set before [Receiver.Produce] is called.
 	ErrNoLogger = errors.New("Logger not set")
@@ -449,6 +456,23 @@ func (r *Receiver) configure(nxt Next) Next {
 	p, r.reload_p = r.reload_p, nil
 	r.mu.Unlock()
 
+	if p.CloseOnActivation != nil {
+		defer func() {
+			close(p.CloseOnActivation)
+		}()
+	}
+	if p.OnActivation != nil {
+		defer func() {
+			p.OnActivation = nil
+		}()
+		if err := p.OnActivation(p); err == ErrNoChange {
+			return nxt
+		} else if err != nil {
+			r.lg.Errorf("Reload failed: %v", err)
+			return nxt
+		}
+	}
+
 	if p.Logger != nil {
 		r.lg = p.Logger // logger first
 	}
@@ -481,18 +505,6 @@ func (r *Receiver) configure(nxt Next) Next {
 	}
 	r.p.ErrorRetryInterval = p.ErrorRetryInterval
 	r.p.FeedbackInterval = p.FeedbackInterval
-	if p.CloseOnActivation != nil {
-		close(p.CloseOnActivation)
-	}
-
-	if p.OnActivation != nil {
-		if err := p.OnActivation(); err != nil {
-			p.OnActivation = nil
-			r.lastErr = err
-			return Stop
-		}
-		p.OnActivation = nil
-	}
 
 	return nxt
 }
