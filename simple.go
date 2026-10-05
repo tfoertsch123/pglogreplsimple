@@ -18,6 +18,10 @@ import (
 // Shutdown is safe to call from any goroutine and is the preferred way to
 // stop a Receiver whose [Receiver.Produce] iterator is currently running.
 func (r *Receiver) Shutdown(err error) {
+	r.mu.Lock()
+	r.lg.Info("Shutdown requested")
+	r.mu.Unlock()
+
 	r.shutdownTrg(err)
 }
 

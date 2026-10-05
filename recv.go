@@ -161,18 +161,17 @@ type Param struct {
 	// Changing it via [Receiver.RequestReload] triggers a reconnection.
 	SlotName string
 	// ErrorRetryInterval is the duration waited before retrying a failed
-	// connection attempt.  Values <= 500 ms are clamped to
+	// connection attempt.  Values < 500 ms are clamped to
 	// [DefaultErrorRetryInterval].
 	ErrorRetryInterval time.Duration
 	// FeedbackInterval is the interval at which standby status updates are
-	// sent to the server.  Values <= 500 ms are clamped to
+	// sent to the server.  Values < 500 ms are clamped to
 	// [DefaultFeedbackInterval].
 	FeedbackInterval time.Duration
-	// FeedbackOnFlush, when non-nil and true, causes [Receiver.AckLSN] to
-	// send a standby status update immediately whenever the flush position
-	// advances, rather than waiting for the next scheduled feedback.  A nil
-	// value leaves the existing setting unchanged during a reload.
-	FeedbackOnFlush *bool
+	// FeedbackOnFlush, when true, causes [Receiver.AckLSN] to send a standby
+	// status update immediately whenever the flush position advances, rather
+	// than waiting for the next scheduled feedback.
+	FeedbackOnFlush bool
 	// Logger receives diagnostic messages from the Receiver.  It must be set
 	// before calling [Receiver.Produce]; otherwise [ErrNoLogger] is returned.
 	Logger Logger
@@ -469,10 +468,8 @@ func (r *Receiver) configure(nxt Next) Next {
 		p.FeedbackInterval = DefaultFeedbackInterval
 	}
 
-	if p.FeedbackOnFlush != nil {
-		r.p.FeedbackOnFlush = p.FeedbackOnFlush
-		r.feedbackOnFlush = *p.FeedbackOnFlush
-	}
+	r.p.FeedbackOnFlush = p.FeedbackOnFlush
+	r.feedbackOnFlush = p.FeedbackOnFlush
 
 	if p.ConnInfo != r.p.ConnInfo {
 		r.p.ConnInfo = p.ConnInfo
@@ -490,9 +487,11 @@ func (r *Receiver) configure(nxt Next) Next {
 
 	if p.OnActivation != nil {
 		if err := p.OnActivation(); err != nil {
+			p.OnActivation = nil
 			r.lastErr = err
 			return Stop
 		}
+		p.OnActivation = nil
 	}
 
 	return nxt

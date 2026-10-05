@@ -921,10 +921,9 @@ func TestAckLSNNoFeedbackOnFlush(t *testing.T) {
 
 func TestConfigureFeedbackOnFlush(t *testing.T) {
 	r := newTestReceiver()
-	tVal := true
 	r.reload_p = &Param{
 		Logger:             fakeLogger{},
-		FeedbackOnFlush:    &tVal,
+		FeedbackOnFlush:    true,
 		ErrorRetryInterval: DefaultErrorRetryInterval,
 		FeedbackInterval:   DefaultFeedbackInterval,
 	}
@@ -932,38 +931,20 @@ func TestConfigureFeedbackOnFlush(t *testing.T) {
 	if !r.feedbackOnFlush {
 		t.Error("feedbackOnFlush = false, want true")
 	}
-	if r.p.FeedbackOnFlush == nil || *r.p.FeedbackOnFlush != true {
+	if !r.p.FeedbackOnFlush {
 		t.Error("p.FeedbackOnFlush not set correctly")
 	}
 
 	// Now reload with it turned off.
-	fVal := false
 	r.reload_p = &Param{
 		Logger:             fakeLogger{},
-		FeedbackOnFlush:    &fVal,
+		FeedbackOnFlush:    false,
 		ErrorRetryInterval: DefaultErrorRetryInterval,
 		FeedbackInterval:   DefaultFeedbackInterval,
 	}
 	r.configure(Recv)
 	if r.feedbackOnFlush {
 		t.Error("feedbackOnFlush = true, want false")
-	}
-}
-
-func TestConfigureFeedbackOnFlushNil(t *testing.T) {
-	r := newTestReceiver()
-	tVal := true
-	r.feedbackOnFlush = true
-	r.p.FeedbackOnFlush = &tVal
-	r.reload_p = &Param{
-		Logger:             fakeLogger{},
-		ErrorRetryInterval: DefaultErrorRetryInterval,
-		FeedbackInterval:   DefaultFeedbackInterval,
-	}
-	r.configure(Recv)
-	// nil FeedbackOnFlush in reload should not change existing state
-	if !r.feedbackOnFlush {
-		t.Error("feedbackOnFlush = false, want unchanged (true)")
 	}
 }
 
