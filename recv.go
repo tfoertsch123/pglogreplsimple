@@ -525,9 +525,6 @@ func (r *Receiver) setCancelCurrent(c context.CancelCauseFunc) {
 // package has been activated. This can be used to close an old logfile for
 // instance.
 func (r *Receiver) RequestReload(p Param) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.lg.Debugf("Reload requested: %#v", p)
 	r.reload_p = &p
 	if r.cancelCurrent != nil {
 		r.cancelCurrent(reloadRequest{})
