@@ -131,6 +131,224 @@ func newIntegrationReceiver(t *testing.T, connInfo, slot string) *Receiver {
 
 // ---------------------------------------------------------------- tests
 
+func TestIntegrationOnConnect(t *testing.T) {
+	connInfo := requireDB(t)
+	slot := slotName(t)
+	cleanup := createSlot(t, connInfo, slot)
+	defer cleanup()
+	setupTable(t, connInfo)
+
+	// Generate WAL after the slot is created. The callback then starts
+	// replication at the slot's confirmed-flush LSN, which is older than
+	// the configured start LSN and must therefore produce this WAL.
+	execSQL(t, connInfo,
+		`INSERT INTO pglogreplsimple_test VALUES (1, 'on_connect')`)
+
+	res := execSQL(t, connInfo,
+		`SELECT confirmed_flush_lsn, pg_current_wal_insert_lsn()
+		 FROM pg_replication_slots WHERE slot_name = '`+slot+`'`)
+	slotLSN, err := pglogrepl.ParseLSN(string(res[0].Rows[0][0]))
+	if err != nil {
+		t.Fatalf("parse confirmed_flush_lsn: %v", err)
+	}
+	configuredStartLSN, err := pglogrepl.ParseLSN(string(res[0].Rows[0][1]))
+	if err != nil {
+		t.Fatalf("parse current WAL LSN: %v", err)
+	}
+	if configuredStartLSN <= slotLSN {
+		t.Fatalf("configured start LSN %v must be ahead of slot LSN %v",
+			configuredStartLSN, slotLSN)
+	}
+
+	callbackCalls := 0
+	var callbackReceiver *Receiver
+	var activePID string
+
+	r := NewReceiver(
+		WithParams(&Param{
+			Logger:             fakeLogger{},
+			ConnInfo:           connInfo,
+			SlotName:           slot,
+			ErrorRetryInterval: 500 * time.Millisecond,
+			FeedbackInterval:   1 * time.Second,
+		}),
+		WithAcceptedPlugins(map[string][]string{
+			"test_decoding": {},
+		}),
+		WithStartLSN(configuredStartLSN),
+		WithOnConnect(func(recv *Receiver) error {
+			callbackCalls++
+			callbackReceiver = recv
+
+			// onConnect is documented to run before START_REPLICATION,
+			// so the slot must not yet have an active backend.
+			pid := execSQL(t, connInfo,
+				`SELECT COALESCE(active_pid::text, 'inactive')
+				 FROM pg_replication_slots WHERE slot_name = '`+slot+`'`)
+			activePID = string(pid[0].Rows[0][0])
+
+			// AckLSN from onConnect supersedes WithStartLSN.
+			recv.AckLSN(slotLSN)
+			return nil
+		}),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	it, err := r.Produce(ctx)
+	if err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	msgCount := 0
+	for msg := range it {
+		switch dat := msg.(type) {
+		case *pglogrepl.XLogData:
+			msgCount++
+			r.AckLSN(dat.WALStart)
+			cancel()
+		case *pglogrepl.PrimaryKeepaliveMessage:
+			r.AckLSN(dat.ServerWALEnd)
+		case *pgproto3.NoticeResponse:
+			// Notices are allowed.
+		}
+	}
+
+	if callbackCalls != 1 {
+		t.Errorf("callbackCalls = %d, want 1", callbackCalls)
+	}
+	if callbackReceiver != r {
+		t.Error("onConnect did not receive the Receiver itself")
+	}
+	if activePID != "inactive" {
+		t.Errorf("activePID at onConnect = %q, want %q", activePID, "inactive")
+	}
+	if msgCount == 0 {
+		t.Error("onConnect AckLSN did not supersede WithStartLSN")
+	}
+	if r.Err() != nil && !errors.Is(r.Err(), context.Canceled) {
+		t.Errorf("r.Err() = %v, want nil or context.Canceled", r.Err())
+	}
+}
+
+func TestIntegrationOnConnectError(t *testing.T) {
+	connInfo := requireDB(t)
+	slot := slotName(t)
+	cleanup := createSlot(t, connInfo, slot)
+	defer cleanup()
+	setupTable(t, connInfo)
+
+	// Generate WAL so that, once the callback succeeds, replication produces
+	// at least one XLogData message.
+	execSQL(t, connInfo,
+		`INSERT INTO pglogreplsimple_test VALUES (1, 'on_connect_err')`)
+
+	callbackCalls := 0
+	var firstErr = errors.New("onConnect: first attempt fails")
+
+
+	r := NewReceiver(
+		WithParams(&Param{
+			Logger:             fakeLogger{},
+			ConnInfo:           connInfo,
+			SlotName:           slot,
+			ErrorRetryInterval: 500 * time.Millisecond,
+			FeedbackInterval:   1 * time.Second,
+		}),
+		WithAcceptedPlugins(map[string][]string{
+			"test_decoding": {},
+		}),
+		WithOnConnect(func(recv *Receiver) error {
+			t.Logf("%v ON-CONNECT", time.Now())
+			callbackCalls++
+			if callbackCalls == 1 {
+				return firstErr
+			}
+			return nil
+		}),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	it, err := r.Produce(ctx)
+	if err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	msgCount := 0
+	for msg := range it {
+		switch dat := msg.(type) {
+		case *pglogrepl.XLogData:
+			msgCount++
+			r.AckLSN(dat.WALStart)
+			cancel()
+		case *pglogrepl.PrimaryKeepaliveMessage:
+			r.AckLSN(dat.ServerWALEnd)
+		case *pgproto3.NoticeResponse:
+			// Notices are allowed.
+		}
+	}
+
+	// The first attempt must fail and trigger a retry; the second must
+	// succeed so the callback was called at least twice.
+	if callbackCalls < 2 {
+		t.Errorf("callbackCalls = %d, want >= 2 (error then retry)", callbackCalls)
+	}
+	if msgCount == 0 {
+		t.Error("no WAL messages received after retry from onConnect error")
+	}
+	if r.Err() != nil && !errors.Is(r.Err(), context.Canceled) {
+		t.Errorf("r.Err() = %v, want nil or context.Canceled", r.Err())
+	}
+}
+
+func TestIntegrationOnConnectShutdown(t *testing.T) {
+	connInfo := requireDB(t)
+	slot := slotName(t)
+	cleanup := createSlot(t, connInfo, slot)
+	defer cleanup()
+
+	shutdownErr := errors.New("shutdown from onConnect")
+
+	r := NewReceiver(
+		WithParams(&Param{
+			Logger:             fakeLogger{},
+			ConnInfo:           connInfo,
+			SlotName:           slot,
+			ErrorRetryInterval: 500 * time.Millisecond,
+			FeedbackInterval:   1 * time.Second,
+		}),
+		WithAcceptedPlugins(map[string][]string{
+			"test_decoding": {},
+		}),
+		WithOnConnect(func(recv *Receiver) error {
+			recv.Shutdown(shutdownErr)
+			return errors.New("onConnect error after shutdown")
+		}),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	it, err := r.Produce(ctx)
+	if err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	for range it {
+		// The iterator must end because Shutdown was called in onConnect.
+	}
+
+	if r.State() != Stop {
+		t.Errorf("State() = %v, want Stop", r.State())
+	}
+	if r.Err() != shutdownErr {
+		t.Errorf("Err() = %v, want %v", r.Err(), shutdownErr)
+	}
+}
+
 func TestIntegrationProduceXLogData(t *testing.T) {
 	connInfo := requireDB(t)
 	slot := slotName(t)
@@ -436,7 +654,7 @@ func TestIntegrationReconnect(t *testing.T) {
 		case *pglogrepl.XLogData:
 			x := execSQL(t, connInfo,
 				`SELECT active_pid FROM pg_replication_slots
-				 WHERE slot_name = '` + slot + `'`,
+				 WHERE slot_name = '`+slot+`'`,
 			)[0].Rows[0][0]
 			r.AckLSN(dat.WALStart)
 			if !gotFirst {
@@ -482,11 +700,11 @@ func TestIntegrationReconnect(t *testing.T) {
 		t.Fatal("expected at least one XLogData before reconnect")
 	}
 	if !gotAfterReconnect {
-		t.Error("expected XLogData after reconnect; "+
+		t.Error("expected XLogData after reconnect; " +
 			"receiver did not reconnect or did not deliver new WAL")
 	}
 }
- 
+
 // Local Variables:
 // tab-width: 4
 // End:

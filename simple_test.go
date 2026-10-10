@@ -3,6 +3,7 @@ package pglogreplsimple
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"testing"
 	"time"
 
@@ -15,22 +16,22 @@ import (
 // fakeLogger is a no-op Logger that satisfies the Logger interface.
 type fakeLogger struct{}
 
-func (fakeLogger) Error(string)               {}
-func (fakeLogger) Warn(string)                {}
-func (fakeLogger) Info(string)                {}
-func (fakeLogger) Debug(string)               {}
-func (fakeLogger) Debg2(string)               {}
-func (fakeLogger) Debg3(string)               {}
-func (fakeLogger) Debg4(string)               {}
-func (fakeLogger) Debg5(string)               {}
-func (fakeLogger) Errorf(string, ...any)      {}
-func (fakeLogger) Warnf(string, ...any)       {}
-func (fakeLogger) Infof(string, ...any)       {}
-func (fakeLogger) Debugf(string, ...any)      {}
-func (fakeLogger) Debg2f(string, ...any)      {}
-func (fakeLogger) Debg3f(string, ...any)      {}
-func (fakeLogger) Debg4f(string, ...any)      {}
-func (fakeLogger) Debg5f(string, ...any)      {}
+func (fakeLogger) Error(string)          {}
+func (fakeLogger) Warn(string)           {}
+func (fakeLogger) Info(string)           {}
+func (fakeLogger) Debug(string)          {}
+func (fakeLogger) Debg2(string)          {}
+func (fakeLogger) Debg3(string)          {}
+func (fakeLogger) Debg4(string)          {}
+func (fakeLogger) Debg5(string)          {}
+func (fakeLogger) Errorf(string, ...any) {}
+func (fakeLogger) Warnf(string, ...any)  {}
+func (fakeLogger) Infof(string, ...any)  {}
+func (fakeLogger) Debugf(string, ...any) {}
+func (fakeLogger) Debg2f(string, ...any) {}
+func (fakeLogger) Debg3f(string, ...any) {}
+func (fakeLogger) Debg4f(string, ...any) {}
+func (fakeLogger) Debg5f(string, ...any) {}
 
 // newTestReceiver builds a Receiver whose fields are populated enough to
 // exercise the state-machine methods without a real database connection.
@@ -53,7 +54,7 @@ func buildKeepaliveData(serverWALEnd pglogrepl.LSN, replyRequested bool) []byte 
 	buf = append(buf, byte(pglogrepl.PrimaryKeepaliveMessageByteID))
 	tmp := make([]byte, 8)
 	binary.BigEndian.PutUint64(tmp, uint64(serverWALEnd))
-	buf = append(buf, tmp...)          // ServerWALEnd
+	buf = append(buf, tmp...)             // ServerWALEnd
 	buf = append(buf, make([]byte, 8)...) // ServerTime (zero)
 	if replyRequested {
 		buf = append(buf, 1)
@@ -425,6 +426,236 @@ func TestConfigureCloseOnActivation(t *testing.T) {
 	}
 }
 
+func TestConfigureOnActivation(t *testing.T) {
+	called := false
+	r := newTestReceiver()
+	customInterval := 10 * time.Second
+	r.reload_p = &Param{
+		Logger: fakeLogger{},
+		OnActivation: func(p *Param) error {
+			called = true
+			if p == nil {
+				t.Fatal("OnActivation received nil *Param")
+			}
+			// The passed Param is the one being activated.
+			if p.Logger == nil {
+				t.Error("passed Param.Logger is nil, expected fakeLogger")
+			}
+			// The callback can still change the parameters.
+			p.ErrorRetryInterval = customInterval
+			return nil
+		},
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	got := r.configure(Recv)
+	if !called {
+		t.Error("OnActivation was not invoked")
+	}
+	if got != Recv {
+		t.Errorf("configure() = %v, want Recv", got)
+	}
+	// The modification made inside OnActivation must take effect.
+	if r.p.ErrorRetryInterval != customInterval {
+		t.Errorf("p.ErrorRetryInterval = %v, want %v (modified inside OnActivation)",
+			r.p.ErrorRetryInterval, customInterval)
+	}
+}
+
+func TestConfigureOnActivationError(t *testing.T) {
+	called := false
+	r := newTestReceiver()
+	errSentinel := errors.New("activation failure")
+	customInterval := 10 * time.Second
+	r.reload_p = &Param{
+		Logger: fakeLogger{},
+		OnActivation: func(p *Param) error {
+			called = true
+			// The callback can still change the parameters, but on error
+			// the whole set is discarded.
+			p.ErrorRetryInterval = customInterval
+			return errSentinel
+		},
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	got := r.configure(Recv)
+	if !called {
+		t.Error("OnActivation was not invoked")
+	}
+	// On error the parameter set is discarded; configure returns nxt
+	// unchanged instead of stopping the iterator.
+	if got != Recv {
+		t.Errorf("configure() = %v, want Recv", got)
+	}
+	// lastErr must not be set — the error is logged, not stored.
+	if r.lastErr != nil {
+		t.Errorf("lastErr = %v, want nil", r.lastErr)
+	}
+	// Param fields should NOT have been applied (set discarded).
+	if r.p.ErrorRetryInterval != DefaultErrorRetryInterval {
+		t.Errorf("p.ErrorRetryInterval = %v, want %v (unchanged)",
+			r.p.ErrorRetryInterval, DefaultErrorRetryInterval)
+	}
+}
+
+func TestConfigureOnActivationErrorWithCloseOnActivation(t *testing.T) {
+	called := false
+	r := newTestReceiver()
+	errSentinel := errors.New("activation failure")
+	ch := make(chan struct{}, 1)
+	r.reload_p = &Param{
+		Logger:            fakeLogger{},
+		CloseOnActivation: ch,
+		OnActivation: func(_ *Param) error {
+			called = true
+			return errSentinel
+		},
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	got := r.configure(Recv)
+	if !called {
+		t.Error("OnActivation was not invoked")
+	}
+	// On error the parameter set is discarded; configure returns nxt.
+	if got != Recv {
+		t.Errorf("configure() = %v, want Recv", got)
+	}
+	if r.lastErr != nil {
+		t.Errorf("lastErr = %v, want nil", r.lastErr)
+	}
+	// CloseOnActivation is closed via a defer so it fires even on error.
+	select {
+	case <-ch:
+		// good
+	default:
+		t.Error("CloseOnActivation channel was not closed")
+	}
+}
+
+func TestConfigureOnActivationNoChange(t *testing.T) {
+	called := false
+	r := newTestReceiver()
+	customInterval := 10 * time.Second
+	r.reload_p = &Param{
+		Logger: fakeLogger{},
+		OnActivation: func(p *Param) error {
+			called = true
+			if p == nil {
+				t.Fatal("OnActivation received nil *Param")
+			}
+			// The callback can change the parameters, but with ErrNoChange
+			// those changes are NOT applied because configure returns early.
+			p.ErrorRetryInterval = customInterval
+			return ErrNoChange
+		},
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	got := r.configure(Recv)
+	if !called {
+		t.Error("OnActivation was not invoked")
+	}
+	// ErrNoChange short-circuits configure, returning nxt unchanged.
+	if got != Recv {
+		t.Errorf("configure() = %v, want Recv", got)
+	}
+	// lastErr must not be set for ErrNoChange.
+	if r.lastErr != nil {
+		t.Errorf("lastErr = %v, want nil", r.lastErr)
+	}
+	// Param fields modified inside OnActivation should NOT have been
+	// applied because configure returns early on ErrNoChange.
+	if r.p.ErrorRetryInterval != DefaultErrorRetryInterval {
+		t.Errorf("p.ErrorRetryInterval = %v, want %v (unchanged)",
+			r.p.ErrorRetryInterval, DefaultErrorRetryInterval)
+	}
+}
+
+func TestConfigureOnActivationNoChangeWithCloseOnActivation(t *testing.T) {
+	called := false
+	r := newTestReceiver()
+	ch := make(chan struct{}, 1)
+	r.reload_p = &Param{
+		Logger:            fakeLogger{},
+		CloseOnActivation: ch,
+		OnActivation: func(_ *Param) error {
+			called = true
+			return ErrNoChange
+		},
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	got := r.configure(Recv)
+	if !called {
+		t.Error("OnActivation was not invoked")
+	}
+	if got != Recv {
+		t.Errorf("configure() = %v, want Recv", got)
+	}
+	// CloseOnActivation is closed via a defer so it fires even when
+	// OnActivation returns ErrNoChange and configure returns early.
+	select {
+	case <-ch:
+		// good — channel was closed despite ErrNoChange
+	default:
+		t.Error("CloseOnActivation channel was not closed")
+	}
+}
+
+func TestConfigureOnActivationNil(t *testing.T) {
+	r := newTestReceiver()
+	r.reload_p = &Param{
+		Logger:             fakeLogger{},
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	got := r.configure(Recv)
+	if got != Recv {
+		t.Errorf("configure() = %v, want Recv", got)
+	}
+}
+
+func TestConfigureOnActivationWithCloseOnActivation(t *testing.T) {
+	called := false
+	r := newTestReceiver()
+	ch := make(chan struct{}, 1)
+	r.reload_p = &Param{
+		Logger:            fakeLogger{},
+		CloseOnActivation: ch,
+		OnActivation: func(p *Param) error {
+			called = true
+			if p == nil {
+				t.Fatal("OnActivation received nil *Param")
+			}
+			// The callback can still change the parameters.
+			p.FeedbackInterval = 42 * time.Second
+			return nil
+		},
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	got := r.configure(Recv)
+	if !called {
+		t.Error("OnActivation was not invoked")
+	}
+	if got != Recv {
+		t.Errorf("configure() = %v, want Recv", got)
+	}
+	// The modification made inside OnActivation must take effect.
+	if r.p.FeedbackInterval != 42*time.Second {
+		t.Errorf("p.FeedbackInterval = %v, want %v",
+			r.p.FeedbackInterval, 42*time.Second)
+	}
+	select {
+	case <-ch:
+		// good — CloseOnActivation was closed after OnActivation ran
+	default:
+		t.Error("CloseOnActivation channel was not closed")
+	}
+}
+
 func TestConfigureBreakShortCircuit(t *testing.T) {
 	r := newTestReceiver()
 	r.state = Break
@@ -775,7 +1006,120 @@ func TestReloadRequestType(t *testing.T) {
 			exp, got)
 	}
 }
- 
+
+// ------------------------------------------------------- FeedbackOnFlush
+
+func TestScheduleFeedbackImmediate(t *testing.T) {
+	r := newTestReceiver()
+	before := time.Now()
+	r.scheduleFeedback(true)
+	got := r.nextFeedback
+	// immediate feedback should be ~now, not FeedbackInterval in the future
+	if got.Before(before.Add(-50*time.Millisecond)) ||
+		got.After(before.Add(50*time.Millisecond)) {
+		t.Errorf("nextFeedback = %v, want ~now (%v)", got, before)
+	}
+}
+
+func TestAckLSNFeedbackOnFlushTriggersImmediateFeedback(t *testing.T) {
+	r := newTestReceiver()
+	r.feedbackOnFlush = true
+	// Set a future nextFeedback so we can detect the override.
+	r.nextFeedback = time.Now().Add(1 * time.Hour)
+	before := time.Now()
+	r.AckLSN(100)
+	got := r.nextFeedback
+	// nextFeedback should have been pulled back to ~now
+	if got.Before(before.Add(-50*time.Millisecond)) ||
+		got.After(before.Add(50*time.Millisecond)) {
+		t.Errorf("nextFeedback = %v, want ~now (%v)", got, before)
+	}
+}
+
+func TestAckLSNFeedbackOnFlushNoAdvance(t *testing.T) {
+	r := newTestReceiver()
+	r.feedbackOnFlush = true
+	// Pre-set fpos so AckLSN(100) does not advance it.
+	r.recvStat.fpos = 200
+	r.prevStat.fpos = 200
+	far := time.Now().Add(1 * time.Hour)
+	r.nextFeedback = far
+	r.AckLSN(100) // 100 < 200, no advancement
+	if r.nextFeedback != far {
+		t.Errorf("nextFeedback = %v, want unchanged (%v)", r.nextFeedback, far)
+	}
+}
+
+func TestAckLSNNoFeedbackOnFlush(t *testing.T) {
+	r := newTestReceiver()
+	// feedbackOnFlush is false (default)
+	far := time.Now().Add(1 * time.Hour)
+	r.nextFeedback = far
+	r.AckLSN(100)
+	if r.nextFeedback != far {
+		t.Errorf("nextFeedback = %v, want unchanged (%v)", r.nextFeedback, far)
+	}
+}
+
+func TestConfigureFeedbackOnFlush(t *testing.T) {
+	r := newTestReceiver()
+	r.reload_p = &Param{
+		Logger:             fakeLogger{},
+		FeedbackOnFlush:    true,
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	r.configure(Recv)
+	if !r.feedbackOnFlush {
+		t.Error("feedbackOnFlush = false, want true")
+	}
+	if !r.p.FeedbackOnFlush {
+		t.Error("p.FeedbackOnFlush not set correctly")
+	}
+
+	// Now reload with it turned off.
+	r.reload_p = &Param{
+		Logger:             fakeLogger{},
+		FeedbackOnFlush:    false,
+		ErrorRetryInterval: DefaultErrorRetryInterval,
+		FeedbackInterval:   DefaultFeedbackInterval,
+	}
+	r.configure(Recv)
+	if r.feedbackOnFlush {
+		t.Error("feedbackOnFlush = true, want false")
+	}
+}
+
 // Local Variables:
 // tab-width: 4
 // End:
+
+// ---------------------------------------------------------------- WithOnConnect
+
+func TestWithOnConnect(t *testing.T) {
+	called := false
+	cb := func(r *Receiver) error {
+		called = true
+		if r == nil {
+			t.Error("onConnect received nil Receiver")
+		}
+		return nil
+	}
+	rcv := NewReceiver(WithOnConnect(cb))
+	if rcv.onConnect == nil {
+		t.Fatal("onConnect is nil, want the callback passed to WithOnConnect")
+	}
+	if err := rcv.onConnect(rcv); err != nil {
+		t.Errorf("onConnect returned %v, want nil", err)
+	}
+	if !called {
+		t.Error("onConnect was not invoked")
+	}
+}
+
+func TestWithOnConnectDefault(t *testing.T) {
+	r := NewReceiver()
+	if r.onConnect != nil {
+		t.Error("onConnect is non-nil by default, want nil")
+	}
+}

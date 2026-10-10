@@ -18,6 +18,10 @@ import (
 // Shutdown is safe to call from any goroutine and is the preferred way to
 // stop a Receiver whose [Receiver.Produce] iterator is currently running.
 func (r *Receiver) Shutdown(err error) {
+	r.mu.Lock()
+	r.lg.Info("Shutdown requested")
+	r.mu.Unlock()
+
 	r.shutdownTrg(err)
 }
 
@@ -202,6 +206,13 @@ func (r *Receiver) connInit() Next {
 		return r.errPause(ctx, cancel, "LSN %v: %v", confirmedFlushLSN, err)
 	}
 
+	if r.onConnect != nil {
+		err = r.onConnect(r)
+		if err != nil {
+			return r.errPause(ctx, cancel, "OnConnect: %v", err)
+		}
+	}
+
 	ourlsn := r.recvStat.wpos
 	adjstat := func() {}
 	if ourlsn == pglogrepl.LSN(0) {
@@ -209,39 +220,39 @@ func (r *Receiver) connInit() Next {
 		if ourlsn == pglogrepl.LSN(0) {
 			ourlsn = slotlsn
 		}
-		if ourlsn < slotlsn {
-			r.shutdownTrg(ErrConfirmedFlushLSN)
-			return r.errPause(ctx, cancel,
-				"Confirmed Flush LSN %v is ahead of requested start LSN %v",
-				slotlsn, ourlsn,
-			)
-		}
-		// If the user requests a start LSN too far in the future, we
-		// refuse to connect. PG would accept it. But we'd send our first
-		// feedback message with that LSN as writeLSN. That would ruin
-		// the slot if that's given by mistake. On the other hand, if it's
-		// not a mistake, we'd just wait until the server is beyond that
-		// point. For that reason, this is not an error causing us to
-		// stop. Instead, we'd log a message until the server has reached
-		// the given start LSN.
-		endlsn, err := pglogrepl.ParseLSN(serverEndLSN)
-		if err != nil {
-			r.shutdownTrg(err)
-			return r.errPause(ctx, cancel, "LSN %v: %v", serverEndLSN, err)
-		}
-		if r.startLSN > endlsn {
-			return r.errPause(ctx, cancel,
-				"StartLSN (%v) cannot be ahead of latest known LSN (%v)",
-				r.startLSN, serverEndLSN)
-		}
-		
 		adjstat = func() {
 			r.recvStat.wpos = ourlsn
 			r.recvStat.fpos = ourlsn
 			r.recvStat.rpos = ourlsn
 		}
 	}
-		
+
+	if ourlsn < slotlsn {
+		r.shutdownTrg(ErrConfirmedFlushLSN)
+		return r.errPause(ctx, cancel,
+			"Confirmed Flush LSN %v is ahead of requested start LSN %v",
+			slotlsn, ourlsn,
+		)
+	}
+	// If the user requests a start LSN too far in the future, we
+	// refuse to connect. PG would accept it. But we'd send our first
+	// feedback message with that LSN as writeLSN. That would ruin
+	// the slot if that's given by mistake. On the other hand, if it's
+	// not a mistake, we'd just wait until the server is beyond that
+	// point. For that reason, this is not an error causing us to
+	// stop. Instead, we'd log a message until the server has reached
+	// the given start LSN.
+	endlsn, err := pglogrepl.ParseLSN(serverEndLSN)
+	if err != nil {
+		r.shutdownTrg(err)
+		return r.errPause(ctx, cancel, "LSN %v: %v", serverEndLSN, err)
+	}
+	if ourlsn > endlsn {
+		return r.errPause(ctx, cancel,
+			"StartLSN (%v) cannot be ahead of latest known LSN (%v)",
+			r.startLSN, serverEndLSN)
+	}
+
 	err = pglogrepl.StartReplication(
 		ctx,
 		conn,
@@ -259,8 +270,12 @@ func (r *Receiver) connInit() Next {
 	return Recv
 }
 
-func (r *Receiver) scheduleFeedback() {
-	r.nextFeedback = time.Now().Add(r.p.FeedbackInterval)
+func (r *Receiver) scheduleFeedback(immediate ...bool) {
+	if len(immediate) > 0 && immediate[0] {
+		r.nextFeedback = time.Now()
+	} else {
+		r.nextFeedback = time.Now().Add(r.p.FeedbackInterval)
+	}
 }
 
 // AckLSN advances the LSN positions reported to the server in the next
@@ -286,6 +301,10 @@ func (r *Receiver) AckLSN(write pglogrepl.LSN, other ...pglogrepl.LSN) {
 		r.recvStat.wpos = max(r.recvStat.wpos, write)
 		r.recvStat.fpos = max(r.recvStat.wpos, other[0])
 		r.recvStat.rpos = max(r.recvStat.wpos, other[1])
+	}
+
+	if r.feedbackOnFlush && r.prevStat.fpos < r.recvStat.fpos {
+		r.scheduleFeedback(true) // immediate feedback after flushpos increase
 	}
 }
 
